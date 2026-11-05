@@ -1,5 +1,5 @@
-import * as oauth from "@atproto/oauth-client";
 import { DASHBOARD_HTML } from "./dashboard";
+import { makeClient, sessionStore } from "./atproto";
 
 export interface Env {
   DB: D1Database;
@@ -15,6 +15,8 @@ const QUEUE_CAP = 100;
 const ALLOWED_SCHEDULES = [60, 360, 1440, 10080]; // hourly, 6h, daily, weekly
 const MAX_OUTPUT = 8000;
 const RETENTION_MS = 30 * 86_400_000;
+const WEB_SESSION_TTL_MS = 30 * 86_400_000;
+const SESSION_COOKIE = "gs_session";
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), {
@@ -43,12 +45,26 @@ function workerAuthed(req: Request, env: Env): boolean {
   return req.headers.get("authorization") === `Bearer ${env.WORKER_TOKEN}`;
 }
 
-// Replaced when login is built: return the DID of the signed-in user, or null.
-async function currentDid(_req: Request, _env: Env): Promise<string | null> {
+function getCookie(req: Request, name: string): string | null {
+  const header = req.headers.get("cookie") ?? "";
+  for (const part of header.split(";")) {
+    const [k, ...rest] = part.trim().split("=");
+    if (k === name) return rest.join("=");
+  }
   return null;
 }
 
-// ---------- AT Proto client identity ----------
+// Returns the DID of the signed-in user, or null.
+async function currentDid(req: Request, env: Env): Promise<string | null> {
+  const id = getCookie(req, SESSION_COOKIE);
+  if (!id) return null;
+  const row = await env.DB.prepare(
+    "SELECT did FROM web_sessions WHERE id = ? AND expires_at > ?",
+  ).bind(id, Date.now()).first<{ did: string }>();
+  return row?.did ?? null;
+}
+
+// ---------- AT Proto login ----------
 
 function clientMetadata(origin: string) {
   return {
@@ -72,6 +88,51 @@ function publicJwks(env: Env): Response {
   const jwk = JSON.parse(env.ATPROTO_CLIENT_JWK) as Record<string, unknown>;
   const { d: _private, ...pub } = jwk;
   return json({ keys: [pub] });
+}
+
+async function login(req: Request, env: Env): Promise<Response> {
+  const url = new URL(req.url);
+  const handle = (url.searchParams.get("handle") ?? "").trim();
+  if (!handle) return json({ error: "handle is required" }, 400);
+  try {
+    const client = await makeClient(env, url.origin, clientMetadata(url.origin));
+    const authUrl = await client.authorize(handle, { scope: "atproto" });
+    return Response.redirect(authUrl.toString(), 302);
+  } catch (err) {
+    return json({ error: "login failed", detail: String(err) }, 400);
+  }
+}
+
+async function oauthCallback(req: Request, env: Env): Promise<Response> {
+  const url = new URL(req.url);
+  try {
+    const client = await makeClient(env, url.origin, clientMetadata(url.origin));
+    const { session } = await client.callback(url.searchParams);
+    const did = session.sub;
+
+    // The token session isn't needed after this point. Delete it.
+    await sessionStore(env.DB).del(did);
+
+    const bytes = crypto.getRandomValues(new Uint8Array(32));
+    const sid = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+
+    await env.DB.batch([
+      env.DB.prepare("INSERT OR IGNORE INTO users (did, created_at) VALUES (?, ?)")
+        .bind(did, Date.now()),
+      env.DB.prepare("INSERT INTO web_sessions (id, did, expires_at) VALUES (?, ?, ?)")
+        .bind(sid, did, Date.now() + WEB_SESSION_TTL_MS),
+    ]);
+
+    return new Response(null, {
+      status: 302,
+      headers: {
+        location: "/",
+        "set-cookie": `${SESSION_COOKIE}=${sid}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${WEB_SESSION_TTL_MS / 1000}`,
+      },
+    });
+  } catch (err) {
+    return json({ error: "sign-in failed", detail: String(err) }, 400);
+  }
 }
 
 // ---------- webhook ----------
@@ -340,18 +401,14 @@ export default {
       });
     }
 
-    // AT Proto client identity (fetched by the authorization server)
+    // AT Proto login and client identity
+    if (req.method === "GET" && p === "/login") return login(req, env);
+    if (req.method === "GET" && p === "/oauth/bsky/callback") return oauthCallback(req, env);
     if (req.method === "GET" && p === "/client-metadata.json") {
       return json(clientMetadata(url.origin));
     }
     if (req.method === "GET" && p === "/jwks.json") {
       return publicJwks(env);
-    }
-
-    // TEMPORARY: confirms the AT Proto client library loads in the Worker runtime.
-    // Remove this route and the import at the top once the login route works.
-    if (req.method === "GET" && p === "/smoke-atproto") {
-      return json({ exports: Object.keys(oauth) });
     }
 
     if (req.method === "POST" && p === "/webhook/github") {

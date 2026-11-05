@@ -1,0 +1,15 @@
+CREATE TABLE IF NOT EXISTS oauth_state (
+  key TEXT PRIMARY KEY,
+  data TEXT NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS atp_sessions (
+  key TEXT PRIMARY KEY,
+  data TEXT NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS web_sessions (
+  id TEXT PRIMARY KEY,
+  did TEXT NOT NULL,
+  expires_at INTEGER NOT NULL
+);
