@@ -2,6 +2,7 @@ export interface Env {
   DB: D1Database;
   GITHUB_WEBHOOK_SECRET: string;
   WORKER_TOKEN: string;
+  ATPROTO_CLIENT_JWK?: string;
 }
 
 const LEASE_MS = 10 * 60_000;
@@ -42,6 +43,32 @@ function workerAuthed(req: Request, env: Env): boolean {
 // Replaced when sign-up is built: return the DID of the signed-in user, or null.
 async function currentDid(_req: Request, _env: Env): Promise<string | null> {
   return null;
+}
+
+// ---------- AT Proto client identity ----------
+
+function clientMetadata(origin: string) {
+  return {
+    client_id: `${origin}/client-metadata.json`,
+    client_name: "GitSync for Tangled",
+    client_uri: origin,
+    redirect_uris: [`${origin}/oauth/bsky/callback`],
+    scope: "atproto",
+    grant_types: ["authorization_code", "refresh_token"],
+    response_types: ["code"],
+    application_type: "web",
+    token_endpoint_auth_method: "private_key_jwt",
+    token_endpoint_auth_signing_alg: "ES256",
+    dpop_bound_access_tokens: true,
+    jwks_uri: `${origin}/jwks.json`,
+  };
+}
+
+function publicJwks(env: Env): Response {
+  if (!env.ATPROTO_CLIENT_JWK) return json({ error: "client key not configured" }, 500);
+  const jwk = JSON.parse(env.ATPROTO_CLIENT_JWK) as Record<string, unknown>;
+  const { d: _private, ...pub } = jwk;
+  return json({ keys: [pub] });
 }
 
 // ---------- webhook ----------
@@ -293,6 +320,14 @@ export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
     const p = url.pathname;
+
+    // AT Proto client identity (fetched by the authorization server)
+    if (req.method === "GET" && p === "/client-metadata.json") {
+      return json(clientMetadata(url.origin));
+    }
+    if (req.method === "GET" && p === "/jwks.json") {
+      return publicJwks(env);
+    }
 
     if (req.method === "POST" && p === "/webhook/github") {
       return handleWebhook(req, env);
