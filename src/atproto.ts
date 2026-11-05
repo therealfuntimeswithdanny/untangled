@@ -1,4 +1,4 @@
-import { OAuthClient, Keyset } from "@atproto/oauth-client";
+import { OAuthClient, Keyset, XrpcHandleResolver } from "@atproto/oauth-client";
 import { WebcryptoKey } from "@atproto/jwk-webcrypto";
 
 export interface AtEnv {
@@ -74,6 +74,7 @@ export async function makeClient(env: AtEnv, origin: string, clientMetadata: obj
     keyset: new Keyset([key]),
     stateStore: stateStore(env.DB),
     sessionStore: sessionStore(env.DB),
+    handleResolver: new XrpcHandleResolver("https://public.api.bsky.app") as any,
     runtimeImplementation: runtime() as any,
   });
 }
