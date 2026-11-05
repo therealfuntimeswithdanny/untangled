@@ -17,6 +17,7 @@
     "wrangler": "^4.157.0"
   },
   "dependencies": {
+    "@atproto/jwk-webcrypto": "^0.3.4",
     "@atproto/oauth-client": "^0.9.0"
   }
 }

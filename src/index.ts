@@ -1,3 +1,6 @@
+import * as oauth from "@atproto/oauth-client";
+import { DASHBOARD_HTML } from "./dashboard";
+
 export interface Env {
   DB: D1Database;
   GITHUB_WEBHOOK_SECRET: string;
@@ -40,7 +43,7 @@ function workerAuthed(req: Request, env: Env): boolean {
   return req.headers.get("authorization") === `Bearer ${env.WORKER_TOKEN}`;
 }
 
-// Replaced when sign-up is built: return the DID of the signed-in user, or null.
+// Replaced when login is built: return the DID of the signed-in user, or null.
 async function currentDid(_req: Request, _env: Env): Promise<string | null> {
   return null;
 }
@@ -170,6 +173,15 @@ async function finishJob(env: Env, jobId: number, outcome: "ok" | "failed", req:
 }
 
 // ---------- user actions (signed-in DID) ----------
+
+async function listRepos(env: Env, did: string): Promise<Response> {
+  const rows = await env.DB.prepare(`
+    SELECT id, github_full_name, tangled_full_name, status, enabled, schedule_minutes,
+      last_synced_at, last_error
+    FROM repos WHERE user_did = ? ORDER BY github_full_name
+  `).bind(did).all();
+  return json({ repos: rows.results });
+}
 
 async function setRepoEnabled(env: Env, did: string, repoId: number, req: Request): Promise<Response> {
   const body = await req.json<{ enabled?: boolean }>().catch(() => null);
@@ -321,12 +333,25 @@ export default {
     const url = new URL(req.url);
     const p = url.pathname;
 
+    // Dashboard
+    if (req.method === "GET" && p === "/") {
+      return new Response(DASHBOARD_HTML, {
+        headers: { "content-type": "text/html; charset=utf-8" },
+      });
+    }
+
     // AT Proto client identity (fetched by the authorization server)
     if (req.method === "GET" && p === "/client-metadata.json") {
       return json(clientMetadata(url.origin));
     }
     if (req.method === "GET" && p === "/jwks.json") {
       return publicJwks(env);
+    }
+
+    // TEMPORARY: confirms the AT Proto client library loads in the Worker runtime.
+    // Remove this route and the import at the top once the login route works.
+    if (req.method === "GET" && p === "/smoke-atproto") {
+      return json({ exports: Object.keys(oauth) });
     }
 
     if (req.method === "POST" && p === "/webhook/github") {
@@ -343,9 +368,11 @@ export default {
     }
 
     // Signed-in user API
-    if (p.startsWith("/api/repos/") || (p.startsWith("/api/jobs/") && req.method === "GET")) {
+    if (p === "/api/repos" || p.startsWith("/api/repos/") || (p.startsWith("/api/jobs/") && req.method === "GET")) {
       const did = await currentDid(req, env);
       if (!did) return json({ error: "sign in required" }, 401);
+
+      if (p === "/api/repos" && req.method === "GET") return listRepos(env, did);
 
       const repoOnly = p.match(/^\/api\/repos\/(\d+)$/);
       if (repoOnly && req.method === "PATCH") return setRepoEnabled(env, did, Number(repoOnly[1]), req);
