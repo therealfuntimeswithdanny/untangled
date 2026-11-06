@@ -1,5 +1,6 @@
 import { DASHBOARD_HTML } from "./dashboard";
 import { makeClient, sessionStore } from "./atproto";
+import { XrpcHandleResolver } from "@atproto/oauth-client";
 
 export interface Env {
   DB: D1Database;
@@ -404,6 +405,27 @@ export default {
     // AT Proto login and client identity
     if (req.method === "GET" && p === "/login") return login(req, env);
     if (req.method === "GET" && p === "/oauth/bsky/callback") return oauthCallback(req, env);
+
+    // TEMPORARY: checks each identity step from inside the Worker. Remove after login works.
+    if (req.method === "GET" && p === "/debug/resolve") {
+      const handle = url.searchParams.get("handle") ?? "";
+      const out: Record<string, unknown> = {};
+      try {
+        out.did = await new XrpcHandleResolver("https://public.api.bsky.app").resolve(handle);
+      } catch (e) {
+        out.handleError = String(e);
+      }
+      if (typeof out.did === "string") {
+        try {
+          const r = await fetch(`https://plc.directory/${out.did}`);
+          out.plcStatus = r.status;
+        } catch (e) {
+          out.plcError = String(e);
+        }
+      }
+      return json(out);
+    }
+
     if (req.method === "GET" && p === "/client-metadata.json") {
       return json(clientMetadata(url.origin));
     }
